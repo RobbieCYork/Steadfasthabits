@@ -107,6 +107,46 @@ create policy "users can update their own profile"
   to authenticated
   using (auth.uid() = id);
 
+-- ---------- helper functions (SECURITY DEFINER) ----------
+--
+-- competitions and competition_members each need to reference the other in
+-- their RLS policies (e.g. "show this competition if I'm a member" / "show
+-- this membership row if the competition is public"). Written as plain
+-- cross-table subqueries, that's mutual recursion: evaluating competitions'
+-- policy triggers competition_members' policy, which triggers competitions'
+-- policy again, forever ("infinite recursion detected", 42P17).
+--
+-- SECURITY DEFINER functions break the cycle: they run as their owner (the
+-- table owner, effectively bypassing RLS entirely for reads inside the
+-- function body), so nesting them never re-triggers any policy.
+
+create or replace function public.is_competition_member(p_competition_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from public.competition_members m
+    where m.competition_id = p_competition_id and m.profile_id = auth.uid()
+  );
+$$;
+
+create or replace function public.can_access_competition(p_competition_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from public.competitions c
+    where c.id = p_competition_id
+      and (c.visibility = 'public' or c.owner_id = auth.uid() or public.is_competition_member(p_competition_id))
+  );
+$$;
+
 -- ---------- competitions ----------
 
 drop policy if exists "competitions visible if public or member" on public.competitions;
@@ -116,10 +156,7 @@ create policy "competitions visible if public or member"
   using (
     visibility = 'public'
     or owner_id = auth.uid()
-    or exists (
-      select 1 from public.competition_members m
-      where m.competition_id = competitions.id and m.profile_id = auth.uid()
-    )
+    or public.is_competition_member(id)
   );
 
 drop policy if exists "users can create competitions" on public.competitions;
@@ -142,36 +179,13 @@ create policy "owner can delete competition"
 
 -- ---------- competition_members ----------
 
--- Membership check as a SECURITY DEFINER function: it bypasses RLS internally,
--- so it can be used inside the competition_members policy itself without the
--- self-referencing subquery that used to cause "infinite recursion detected"
--- (Postgres re-evaluates a table's own RLS policy for any subquery against
--- that same table, including subqueries inside its own policy).
-create or replace function public.is_competition_member(p_competition_id uuid)
-returns boolean
-language sql
-security definer
-set search_path = public
-stable
-as $$
-  select exists (
-    select 1 from public.competition_members m
-    where m.competition_id = p_competition_id and m.profile_id = auth.uid()
-  );
-$$;
-
 drop policy if exists "members visible to other members or if public" on public.competition_members;
 create policy "members visible to other members or if public"
   on public.competition_members for select
   to authenticated
   using (
     profile_id = auth.uid()
-    or exists (
-      select 1 from public.competitions c
-      where c.id = competition_members.competition_id
-        and (c.visibility = 'public' or c.owner_id = auth.uid())
-    )
-    or public.is_competition_member(competition_members.competition_id)
+    or public.can_access_competition(competition_id)
   );
 
 drop policy if exists "self can leave competition" on public.competition_members;
@@ -191,13 +205,7 @@ create policy "habits visible within their scope"
   to authenticated
   using (
     (scope_type = 'solo' and scope_id = auth.uid())
-    or (scope_type = 'competition' and exists (
-      select 1 from public.competitions c
-      where c.id = habits.scope_id
-        and (c.visibility = 'public' or c.owner_id = auth.uid() or exists (
-          select 1 from public.competition_members m where m.competition_id = c.id and m.profile_id = auth.uid()
-        ))
-    ))
+    or (scope_type = 'competition' and public.can_access_competition(scope_id))
   );
 
 drop policy if exists "users can add habits to their own scope" on public.habits;
@@ -208,9 +216,7 @@ create policy "users can add habits to their own scope"
     owner_id = auth.uid()
     and (
       (scope_type = 'solo' and scope_id = auth.uid())
-      or (scope_type = 'competition' and exists (
-        select 1 from public.competition_members m where m.competition_id = habits.scope_id and m.profile_id = auth.uid()
-      ))
+      or (scope_type = 'competition' and public.is_competition_member(scope_id))
     )
   );
 
@@ -232,13 +238,7 @@ create policy "entries visible to self and habit-mates"
       select 1 from public.habits h
       where h.id = entries.habit_id
         and h.scope_type = 'competition'
-        and exists (
-          select 1 from public.competitions c
-          where c.id = h.scope_id
-            and (c.visibility = 'public' or c.owner_id = auth.uid() or exists (
-              select 1 from public.competition_members m where m.competition_id = c.id and m.profile_id = auth.uid()
-            ))
-        )
+        and public.can_access_competition(h.scope_id)
     )
   );
 
