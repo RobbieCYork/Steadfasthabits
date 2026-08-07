@@ -142,6 +142,24 @@ create policy "owner can delete competition"
 
 -- ---------- competition_members ----------
 
+-- Membership check as a SECURITY DEFINER function: it bypasses RLS internally,
+-- so it can be used inside the competition_members policy itself without the
+-- self-referencing subquery that used to cause "infinite recursion detected"
+-- (Postgres re-evaluates a table's own RLS policy for any subquery against
+-- that same table, including subqueries inside its own policy).
+create or replace function public.is_competition_member(p_competition_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from public.competition_members m
+    where m.competition_id = p_competition_id and m.profile_id = auth.uid()
+  );
+$$;
+
 drop policy if exists "members visible to other members or if public" on public.competition_members;
 create policy "members visible to other members or if public"
   on public.competition_members for select
@@ -153,10 +171,7 @@ create policy "members visible to other members or if public"
       where c.id = competition_members.competition_id
         and (c.visibility = 'public' or c.owner_id = auth.uid())
     )
-    or exists (
-      select 1 from public.competition_members m2
-      where m2.competition_id = competition_members.competition_id and m2.profile_id = auth.uid()
-    )
+    or public.is_competition_member(competition_members.competition_id)
   );
 
 drop policy if exists "self can leave competition" on public.competition_members;
