@@ -26,6 +26,7 @@ export const HABIT_CATALOG: CatalogHabit[] = [
   { name: 'Count My Calories', icon: '🍎', category: 'health' },
   { name: 'Walk 1 Mile', icon: '🚶', category: 'health' },
   { name: 'Go for a Jog', icon: '🏃', category: 'health' },
+  { name: 'Exercise', icon: '💪', category: 'health' },
   { name: 'Meditate 10 Minutes', icon: '🧘', category: 'mind' },
   { name: 'Drink 8 Glasses of Water', icon: '💧', category: 'health' },
   { name: 'Write 3 Gratitudes', icon: '📝', category: 'mind' },
